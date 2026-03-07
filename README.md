@@ -2,19 +2,20 @@
 
 Python で実装した stdio 専用の MCP Server です。
 
-このサーバーは `build_project` ツールだけを提供します。`build_project` は引数を取らず、サーバー起動時に読み込んだ設定に従ってビルドコマンドを実行します。
+このサーバーは、YAML 設定ファイルに定義された複数のツールを提供します。各ツールは引数を取らず、サーバー起動時に読み込んだ設定に従って固定コマンドを実行します。
 
 ## 機能
 
 - stdio 専用 MCP Server
-- ツールは `build_project` のみ
-- ビルド実行中に一定間隔で progress 通知を送信
+- YAML 設定から複数ツールを動的登録
+- ツール実行中に一定間隔で progress 通知を送信
 - 完了後に結果とログファイルパスを返却
-- `config.json` からビルド設定を読込
+- `config.yaml` からツール設定を読込
 
 ## 必要ライブラリ
 
 - `mcp`
+- `PyYAML`
 
 インストール例:
 
@@ -24,55 +25,60 @@ pip install -r requirements.txt
 
 ## 起動方法
 
-### デフォルト設定で起動
+設定ファイルを指定して起動します。
 
 ```bash
-python server.py
+python server.py config.yaml
 ```
 
-### 設定ファイルを指定して起動
-
-```bash
-python server.py config.json
-```
-
-## config.json
+## config.yaml
 
 指定できる項目:
 
-- `BUILD_COMMAND`: 実行コマンドの配列
-- `BUILD_LOG_PATH`: ログファイルの出力先
-- `PROGRESS_INTERVAL_SEC`: progress 通知間隔（秒）
-- `WORKING_DIR`: `BUILD_COMMAND` 実行時のカレントディレクトリ
+- `progress_interval_sec`: progress 通知間隔（秒）
+- `tools`: ツール定義の配列
+  - `name`: ツール名
+  - `description`: ツール説明
+  - `command`: 実行コマンドの配列
+  - `log_path`: ログファイルの出力先
+  - `working_dir`: 実行時のカレントディレクトリ
 
 例:
 
-```json
-{
-  "BUILD_COMMAND": ["python", "-m", "build"],
-  "BUILD_LOG_PATH": "build_project.log",
-  "PROGRESS_INTERVAL_SEC": 5,
-  "WORKING_DIR": "."
-}
+```yaml
+progress_interval_sec: 5
+tools:
+  - name: "build_project"
+    description: "Run a fixed build command."
+    command: ["python", "-m", "build"]
+    log_path: "build_project.log"
+    working_dir: "."
+  - name: "run_all_project_tests"
+    description: "Run all tests in this project."
+    command: ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
+    log_path: "test_project.log"
+    working_dir: "."
 ```
 
 ### パス解決ルール
 
-- `BUILD_LOG_PATH` と `WORKING_DIR` が相対パスの場合、`config.json` が置かれているディレクトリ基準で解決されます。
+- `log_path` と `working_dir` が相対パスの場合、`config.yaml` が置かれているディレクトリ基準で解決されます。
 - 絶対パスの場合はそのまま使われます。
 
 ## ツール仕様
-
-### `build_project`
 
 入力:
 - なし
 
 動作:
-1. 設定済みの `BUILD_COMMAND` を実行
-2. 標準出力・標準エラーを `BUILD_LOG_PATH` に保存
-3. ビルド中は progress 通知を送信
+1. 設定済みの `command` を実行
+2. 標準出力・標準エラーを `log_path` に保存
+3. 実行中は progress 通知を送信
 4. 完了後に最終結果を返却
+
+補足:
+- ツール名は任意の文字列を使えます。
+- すべてのツールで `command` の指定が必須です。
 
 成功時のレスポンス例:
 

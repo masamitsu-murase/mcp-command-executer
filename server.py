@@ -1,34 +1,26 @@
 import asyncio
-import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
+import yaml
 from mcp.server.fastmcp import Context, FastMCP
+
+
+@dataclass(slots=True, frozen=True)
+class ToolConfig:
+    name: str
+    description: str
+    command: list[str]
+    log_path: Path
+    working_dir: Path
 
 
 @dataclass(slots=True)
 class ServerConfig:
-    build_command: list[str]
-    build_log_path: Path
     progress_interval_sec: int | float
-    working_dir: Path
-
-
-DEFAULT_BUILD_COMMAND = ["python", "-m", "build"]
-DEFAULT_BUILD_LOG_PATH = Path("build_project.log")
-DEFAULT_PROGRESS_INTERVAL_SEC = 5
-DEFAULT_WORKING_DIR = Path.cwd()
-
-SERVER_CONFIG = ServerConfig(
-    build_command=DEFAULT_BUILD_COMMAND.copy(),
-    build_log_path=DEFAULT_BUILD_LOG_PATH,
-    progress_interval_sec=DEFAULT_PROGRESS_INTERVAL_SEC,
-    working_dir=DEFAULT_WORKING_DIR,
-)
-
-mcp = FastMCP("build-project-server")
+    tools: list[ToolConfig]
 
 
 def _resolve_path(raw_path: str, base_dir: Path) -> Path:
@@ -38,60 +30,105 @@ def _resolve_path(raw_path: str, base_dir: Path) -> Path:
     return (base_dir / path).resolve()
 
 
+def _validate_command(command_raw: Any, label: str) -> list[str]:
+    if (
+        not isinstance(command_raw, list)
+        or not command_raw
+        or not all(isinstance(item, str) and item for item in command_raw)
+    ):
+        raise ValueError(f"{label} must be a non-empty array of strings")
+    return command_raw.copy()
+
+
 def _load_config(config_path_arg: str | None) -> ServerConfig:
     if config_path_arg is None:
-        return ServerConfig(
-            build_command=DEFAULT_BUILD_COMMAND.copy(),
-            build_log_path=DEFAULT_BUILD_LOG_PATH.resolve(),
-            progress_interval_sec=DEFAULT_PROGRESS_INTERVAL_SEC,
-            working_dir=DEFAULT_WORKING_DIR.resolve(),
-        )
+        raise ValueError("config path is required")
 
     config_path = Path(config_path_arg).resolve()
     config_dir = config_path.parent
 
     with config_path.open("r", encoding="utf-8") as config_file:
-        config_data = json.load(config_file)
+        config_data = yaml.safe_load(config_file) or {}
 
-    build_command_raw = config_data.get("BUILD_COMMAND", DEFAULT_BUILD_COMMAND)
-    if (
-        not isinstance(build_command_raw, list)
-        or not build_command_raw
-        or not all(
-            isinstance(item, str) and item
-            for item in build_command_raw
-        )
-    ):
-        raise ValueError("BUILD_COMMAND must be a non-empty array of strings")
+    if not isinstance(config_data, dict):
+        raise ValueError("config file must contain a YAML mapping")
 
-    build_log_path_raw = config_data.get(
-        "BUILD_LOG_PATH",
-        str(DEFAULT_BUILD_LOG_PATH),
-    )
-    if not isinstance(build_log_path_raw, str) or not build_log_path_raw:
-        raise ValueError("BUILD_LOG_PATH must be a non-empty string")
+    if "progress_interval_sec" not in config_data:
+        raise ValueError("progress_interval_sec is required")
 
-    progress_interval_raw = config_data.get(
-        "PROGRESS_INTERVAL_SEC",
-        DEFAULT_PROGRESS_INTERVAL_SEC,
-    )
+    progress_interval_raw = config_data["progress_interval_sec"]
     if not isinstance(progress_interval_raw, int | float):
-        raise ValueError("PROGRESS_INTERVAL_SEC must be a number")
+        raise ValueError("progress_interval_sec must be a number")
     if progress_interval_raw <= 0:
-        raise ValueError("PROGRESS_INTERVAL_SEC must be greater than 0")
+        raise ValueError("progress_interval_sec must be greater than 0")
 
-    working_dir_raw = config_data.get("WORKING_DIR", str(config_dir))
-    if not isinstance(working_dir_raw, str) or not working_dir_raw:
-        raise ValueError("WORKING_DIR must be a non-empty string")
+    if "tools" not in config_data:
+        raise ValueError("tools is required")
 
-    working_dir = _resolve_path(working_dir_raw, config_dir)
-    build_log_path = _resolve_path(build_log_path_raw, config_dir)
+    tools_raw = config_data["tools"]
+    if not isinstance(tools_raw, list) or not tools_raw:
+        raise ValueError("tools must be a non-empty array")
+
+    tools: list[ToolConfig] = []
+    seen_names: set[str] = set()
+
+    for index, tool_raw in enumerate(tools_raw):
+        if not isinstance(tool_raw, dict):
+            raise ValueError(f"tools[{index}] must be a mapping")
+
+        if "name" not in tool_raw:
+            raise ValueError(f"tools[{index}].name is required")
+        name = tool_raw["name"]
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"tools[{index}].name must be a non-empty string")
+        if name in seen_names:
+            raise ValueError(f"duplicate tool name is not allowed: {name}")
+
+        if "description" not in tool_raw:
+            raise ValueError(f"tools[{index}].description is required")
+        description = tool_raw["description"]
+        if not isinstance(description, str) or not description:
+            raise ValueError(
+                f"tools[{index}].description must be a non-empty string"
+            )
+
+        if "log_path" not in tool_raw:
+            raise ValueError(f"tools[{index}].log_path is required")
+        log_path_raw = tool_raw["log_path"]
+        if not isinstance(log_path_raw, str) or not log_path_raw:
+            raise ValueError(
+                f"tools[{index}].log_path must be a non-empty string"
+            )
+
+        if "working_dir" not in tool_raw:
+            raise ValueError(f"tools[{index}].working_dir is required")
+        working_dir_raw = tool_raw["working_dir"]
+        if not isinstance(working_dir_raw, str) or not working_dir_raw:
+            raise ValueError(
+                f"tools[{index}].working_dir must be a non-empty string"
+            )
+
+        if "command" not in tool_raw:
+            raise ValueError(f"tools[{index}].command is required")
+        command = _validate_command(
+            tool_raw["command"],
+            f"tools[{index}].command",
+        )
+
+        tools.append(
+            ToolConfig(
+                name=name,
+                description=description,
+                command=command,
+                log_path=_resolve_path(log_path_raw, config_dir),
+                working_dir=_resolve_path(working_dir_raw, config_dir),
+            ),
+        )
+        seen_names.add(name)
 
     return ServerConfig(
-        build_command=build_command_raw,
-        build_log_path=build_log_path,
         progress_interval_sec=progress_interval_raw,
-        working_dir=working_dir,
+        tools=tools,
     )
 
 
@@ -99,29 +136,31 @@ def _get_log_path_for_response(log_path: Path) -> str:
     return log_path.as_posix()
 
 
-@mcp.tool()
-async def build_project(ctx: Context) -> dict[str, Any]:
-    """Run a fixed build command and report progress every 5 seconds."""
-    config = SERVER_CONFIG
+async def _run_configured_tool(
+    ctx: Context,
+    server_config: ServerConfig,
+    tool_config: ToolConfig,
+) -> dict[str, Any]:
     process: asyncio.subprocess.Process | None = None
     log_file: TextIO | None = None
 
     try:
-        config.build_log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_file = config.build_log_path.open("w", encoding="utf-8")
+        tool_config.log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = tool_config.log_path.open("w", encoding="utf-8")
 
         process = await asyncio.create_subprocess_exec(
-            *config.build_command,
+            *tool_config.command,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=log_file,
             stderr=asyncio.subprocess.STDOUT,
-            cwd=str(config.working_dir),
+            cwd=str(tool_config.working_dir),
         )
 
         progress = 0.0
         await ctx.report_progress(
             progress=progress,
             total=None,
-            message="build started",
+            message=f"{tool_config.name} started",
         )
 
         started_at = asyncio.get_running_loop().time()
@@ -130,17 +169,17 @@ async def build_project(ctx: Context) -> dict[str, Any]:
             try:
                 await asyncio.wait_for(
                     process.wait(),
-                    timeout=config.progress_interval_sec,
+                    timeout=server_config.progress_interval_sec,
                 )
             except asyncio.TimeoutError:
                 progress += 1.0
                 elapsed_sec = int(
-                    asyncio.get_running_loop().time() - started_at,
+                    asyncio.get_running_loop().time() - started_at
                 )
                 await ctx.report_progress(
                     progress=progress,
                     total=None,
-                    message=f"build running... ({elapsed_sec}s)",
+                    message=f"{tool_config.name} running... ({elapsed_sec}s)",
                 )
 
         if process.returncode is not None:
@@ -151,12 +190,12 @@ async def build_project(ctx: Context) -> dict[str, Any]:
         if exit_code == 0:
             return {
                 "result": "success",
-                "log": _get_log_path_for_response(config.build_log_path),
+                "log": _get_log_path_for_response(tool_config.log_path),
             }
 
         return {
             "result": "failure",
-            "log": _get_log_path_for_response(config.build_log_path),
+            "log": _get_log_path_for_response(tool_config.log_path),
             "exit_code": exit_code,
         }
 
@@ -165,16 +204,13 @@ async def build_project(ctx: Context) -> dict[str, Any]:
             process.kill()
             await process.wait()
 
-        if config.build_log_path.exists():
-            with config.build_log_path.open(
-                "a",
-                encoding="utf-8",
-            ) as error_log:
+        if tool_config.log_path.exists():
+            with tool_config.log_path.open("a", encoding="utf-8") as error_log:
                 error_log.write(f"\n[server_error] {exc}\n")
 
         return {
             "result": "failure",
-            "log": _get_log_path_for_response(config.build_log_path),
+            "log": _get_log_path_for_response(tool_config.log_path),
             "error": str(exc),
         }
 
@@ -184,16 +220,37 @@ async def build_project(ctx: Context) -> dict[str, Any]:
             log_file.close()
 
 
+def _create_tool_handler(server_config: ServerConfig, tool_config: ToolConfig):
+    async def _tool(ctx: Context) -> dict[str, Any]:
+        return await _run_configured_tool(ctx, server_config, tool_config)
+
+    _tool.__name__ = tool_config.name
+    _tool.__doc__ = tool_config.description
+    return _tool
+
+
+def _register_tools(
+    mcp_server: FastMCP,
+    server_config: ServerConfig,
+) -> None:
+    for tool_config in server_config.tools:
+        mcp_server.add_tool(
+            _create_tool_handler(server_config, tool_config),
+            name=tool_config.name,
+            description=tool_config.description,
+        )
+
+
 def main() -> None:
-    global SERVER_CONFIG
+    if len(sys.argv) != 2:
+        raise SystemExit("Usage: python server.py config.yaml")
 
-    if len(sys.argv) > 2:
-        raise SystemExit("Usage: python server.py [config.json]")
+    mcp_server = FastMCP("build-project-server")
+    config_path_arg = sys.argv[1]
+    server_config = _load_config(config_path_arg)
+    _register_tools(mcp_server, server_config)
 
-    config_path_arg = sys.argv[1] if len(sys.argv) == 2 else None
-    SERVER_CONFIG = _load_config(config_path_arg)
-
-    mcp.run(transport="stdio")
+    mcp_server.run(transport="stdio")
 
 
 if __name__ == "__main__":
