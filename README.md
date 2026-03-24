@@ -1,4 +1,4 @@
-# build_python
+# mcp-command-executer
 
 Python で実装した stdio 専用の MCP Server です。
 
